@@ -1,0 +1,11 @@
+# Emacs backups
+*~
+
+# Byte compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
