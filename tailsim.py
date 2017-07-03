@@ -221,7 +221,7 @@ class Simulation(object):
 
             # First event may be within commitment
             try:
-                self._schedule = sorted(self._schedule, key=lambda e: e.time)
+                self._schedule.sort(key=lambda e: e.time)
                 next_event = self._schedule[0]
                 if self._commit_time >= next_event.time:
                     yield self._schedule.pop(0)
@@ -234,7 +234,7 @@ class Simulation(object):
 
             # Stop if no consensus to next event
             try:
-                self._schedule = sorted(self._schedule, key=lambda e: e.time)
+                self._schedule.sort(key=lambda e: e.time)
                 if self._commit_time < self._schedule[0].time:
                     self.log("Can't get commitment to next event: {}".format(self._schedule[0]))
                     return
