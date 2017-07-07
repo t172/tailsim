@@ -5,9 +5,6 @@ import sys
 import argparse
 import numpy as np
 import matplotlib as mpl
-mpl.use('agg')
-import matplotlib.mlab as mlab
-import matplotlib.pyplot as plt
 
 assert sys.version_info >= (2,7)
 
@@ -17,12 +14,18 @@ def main():
     parser.add_argument('-t', '--title', nargs='?', type=str, default=None, help='plot title string')
     parser.add_argument('-o', '--outfile', nargs='?', type=argparse.FileType('w'), default=None, help='output image file')
     parser.add_argument('-b', '--batch', action='store_true', help='batch mode (no interactive plots)')
+    parser.add_argument('-k', '--keep', action='store_true', help='keep outliers')
     cmdline = parser.parse_args()
+
+    if cmdline.batch:
+        mpl.use('agg')
+    import matplotlib.mlab as mlab
+    import matplotlib.pyplot as plt
 
     values = []
     for line in cmdline.infile:
         fields = line.split()
-        values += [float(v) for v in fields[3:]]
+        values += [float(v) for v in fields[5:]]
 
     q1, q3 = np.percentile(values, [25, 75])
     iqr = abs(q3 - q1)
@@ -42,7 +45,12 @@ def main():
     print('median =', np.median(slimmed))
     print('stddev =', np.std(slimmed))
     print()
-    print('Slimmed', len(values) - len(slimmed), 'values')
+
+    if cmdline.keep:
+        print('Keeping', len(values) - len(slimmed), 'outliers')
+        slimmed = values
+    else:
+        print('Discarding', len(values) - len(slimmed), 'outliers')
 
     mean = np.mean(slimmed)
     stddev = np.std(slimmed)
