@@ -3,6 +3,7 @@
 from __future__ import print_function
 import sys
 import random
+from collections import deque
 from scipy.stats import expon
 
 assert sys.version_info >= (2,7)
@@ -22,7 +23,7 @@ class SimulationError(Exception):
         self.message = message
 
     def __str__(self):
-        return "Simulation Error at time {}: {}".format(self.time, self.message)
+        return "Simulation error (time {}): {}".format(self.time, self.message)
     def __repr__(self):
         return "{}({},{})".format(self.__class__.__name__, repr(self.time), repr(self.message))
 
@@ -38,16 +39,15 @@ class Event(object):
         self.time = scheduled_time
         self.action = action
 
-    def __call__(self, time):
+    def __call__(self):
         """
         Perform the action of this Event, applying it to the state of the
-        simulation.  The current simulation time is passed as the
-        argument.
+        simulation.
         """
-        self.action(time)
+        self.action()
 
     def __repr__(self):
-        return "{}({}, actor={}, action={})".format(self.__class__.__name__, self.time, self.actor, self.action)
+        return "{}({}, actor={}, action={})".format(self.__class__.__name__, self.time, self.actor.__class__.__name__, self.action)
 
 class Actor(object):
     """
@@ -69,10 +69,6 @@ class Actor(object):
         #     raise SimulationError(None, "{} is not registered with any Simulation: {}".format(self.__class__.__name__, self))
         return self._simulation
 
-    @sim.setter
-    def sim(self, simulation):
-        self.bind_to(simulation)
-
     @property
     def now(self):
         """The current time of the Simulation this Actor is bound to.""" 
@@ -86,7 +82,6 @@ class Actor(object):
         if not isinstance(simulation, Simulation):
             raise ValueError("{} must be a Simulation".format(simulation))
         self._simulation = simulation
-        self.commitment = simulation.now
 
     def schedule_event(self, time, action):
         """
@@ -94,8 +89,7 @@ class Actor(object):
         The return value is the argument to pass to cancel_event() to
         cancel this action.
         """
-        event = Event(self, time, action)
-        return self.sim.schedule(event)
+        return self.sim.schedule(Event(self, time, action))
 
     def cancel_event(self, handle):
         """
@@ -136,7 +130,7 @@ class Actor(object):
         inserting new (e.g. random) events or negotiating time
         progression.
         """
-        return future_time
+        return future_time, False
 
 class Simulation(object):
     """
@@ -147,9 +141,9 @@ class Simulation(object):
     def __init__(self):
         self.now = 0
         self.actors = []
-        self._schedule = []
-        self._canceled_events = []
-        self._past_events = []
+        self._schedule = deque()
+        #self._canceled_events = []
+        #self._past_events = []
         self._commit_time = self.now  # latest unanimous commitment
 
     def add_actor(self, actor):
@@ -170,7 +164,22 @@ class Simulation(object):
             raise SimulationError(self.now, "Can't schedule Event in the past: {}".format(event))
         if event.time < event.actor.commitment:
             raise SimulationError(self.now, "{} violates {}'s commitment of time {}".format(event, event.actor, event.actor.commitment))
-        self._schedule.append(event)
+
+        #print('Adding', event, 'to', self._schedule)
+
+        # Insert new event in order
+        if len(self._schedule) == 0:
+            self._schedule.appendleft(event)
+        else:
+            rotation = 0
+            while rotation < len(self._schedule) and event.time < self._schedule[rotation].time:
+                rotation += 1
+            self._schedule.rotate(-rotation)
+            self._schedule.appendleft(event)
+            self._schedule.rotate(rotation)
+
+        #print('Schedule is', self._schedule)
+
         # Here, we simply return the event itself, but this should be
         # considered an implementation detail.  What the return value
         # really is should be opaque to the Actor, but it must
@@ -185,8 +194,8 @@ class Simulation(object):
             self._schedule.remove(handle)
         except ValueError:
             raise SimulationError(self.now, "Cannot cancel event {}".format(handle))
-        self._canceled_events.append(handle)
-        self.log("Canceled {}".format(handle))
+        #self._canceled_events.append(handle)
+        #self.log("Canceled {}".format(handle))
 
     def cancel_all_from(self, actor):
         """
@@ -194,15 +203,19 @@ class Simulation(object):
         number of events canceled.
         """
         num_canceled = 0
-        new_schedule = []
-        for event in self._schedule:
+        new_schedule = deque()
+
+        while True:
+            try:
+                event = self._schedule.pop()
+            except IndexError:
+                break
             if event.actor == actor:
-                self._canceled_events.append(event)
-                self.log("Canceled {}".format(event))
                 num_canceled += 1
             else:
-                new_schedule.append(event)
+                new_schedule.appendleft(event)
         self._schedule = new_schedule
+        #self.log('Canceled {} events'.format(num_canceled))
         return num_canceled
 
     def log(self, msg):
@@ -219,27 +232,37 @@ class Simulation(object):
                 self.log("Stopping")
                 return
 
+            for i in xrange(len(self._schedule)-1):
+                if self._schedule[i].time < self._schedule[i+1].time:
+                    print('Schedule is out of order, pos', i)
+                    import pdb; pdb.set_trace()
+
             # First event may be within commitment
             try:
-                self._schedule.sort(key=lambda e: e.time)
-                next_event = self._schedule[0]
-                if self._commit_time >= next_event.time:
-                    yield self._schedule.pop(0)
+                if self._commit_time >= self._schedule[-1].time:
+                    yield self._schedule.pop()
                     continue
             except IndexError:
                 break
 
             # Try to extend commitment
-            self._commit_time = min(actor.commit_to(next_event.time) for actor in self.actors)
+            dirty = True
+            while dirty:
+                commitments = []
+                for actor in self.actors:
+                    commitment, dirty = actor.commit_to(self._schedule[-1].time)
+                    if dirty:
+                        break
+                    commitments.append(commitment)
+            self._commit_time = min(commitments)
 
             # Stop if no consensus to next event
             try:
-                self._schedule.sort(key=lambda e: e.time)
-                if self._commit_time < self._schedule[0].time:
-                    self.log("Can't get commitment to next event: {}".format(self._schedule[0]))
+                if self._commit_time < self._schedule[-1].time:
+                    self.log("Can't get commitment to next event: {}".format(self._schedule[-1]))
                     return
                 else:
-                    yield self._schedule.pop(0)
+                    yield self._schedule.pop()
             except IndexError:
                 break
 
@@ -254,18 +277,27 @@ class Simulation(object):
         """
         self.log("{} has {} actors and {} scheduled events".format(self.__class__.__name__, len(self.actors), len(self._schedule)))
         self.stop_requested = False
-        if len(self.actors) > 0:
-            self.log("Sending start notifications to Actors")
-            for actor in self.actors:
-                actor.start()
-        self.log("Starting at time {} with {} scheduled events".format(self.now, len(self._schedule)))
+        if len(self.actors) == 0:
+            self.log("No Actors, quitting")
+            return
+
+        self.log("Sending start notifications to Actors")
+        for actor in self.actors:
+            actor.start()
+
+        self.log("Starting with {} scheduled events".format(len(self._schedule)))
         for event in self.take_next():
+            if event.time < self.now:
+                raise SimulationError(self.now, "Event is stale: {}".format(event))
             self.now = event.time
-            event(self.now)
+            #self.log('Doing {}'.format(event))
+            event()
         self.log("Done")
 
-    def stop(self):
+    def stop(self, reason=None):
         """Request the Simulation to stop."""
+        if reason:
+            self.log('Stop requested: ' + str(reason))
         self.stop_requested = True
 
 class WorkUnit(object):
@@ -410,6 +442,10 @@ class Task(object):
         return len(self._units)
 
     @property
+    def is_done(self):
+        return self.state == TaskRun.DONE
+
+    @property
     def scale(self):
         """The total time scaling for all this Task's WorkUnits"""
         return self._scale
@@ -455,18 +491,27 @@ class Task(object):
     def __repr__(self):
         return "{}(task_id={}, size={}, scale={}, {})".format(self.__class__.__name__, self._task_id, self.size, self.scale, self._history)
 
-class LinearRuntime(object):
+class RuntimeModel(object):
+    def runtime_of(self, task):
+        """
+        Calculates the running time of a given task according to this
+        RuntimeModel.
+        """
+        raise NotImplementedError("A subclass should implement this method")
+
+class LinearRuntime(RuntimeModel):
     """
     A simple linear model of the running time of a Task, with a slope
     and y-intercept.
     """
     def __init__(self, slope, intercept):
+        super(LinearRuntime, self).__init__()
         self._slope = slope
         self._intercept = intercept
 
     def runtime_of(self, task):
         """Calculates the running time of a given Task"""
-        return self._slope*task.scale + self._intercept
+        return int(self._slope*task.scale + self._intercept)
 
     def __repr__(self):
         return "{}({}x + {})".format(self.__class__.__name__, self._slope, self._intercept)
@@ -481,14 +526,14 @@ class Host(Actor):
     representation of Host resources (CPU, memory, etc.) to be matched
     to Task requirements.)
     """
-    def __init__(self, host_id, num_slots, runtime_model, eviction_scale=0, restart_delay=0):
+    def __init__(self, host_id, num_slots, runtime_model, mtbe=None, restart_delay=0):
         """
         Initializes a Host with the given ID, number of slots with which
         to run Tasks, a runtime model that determines the running time
         of a Task, and an optional mean time between evictions.
         Eviction is modeled as a Poisson process, with the parameter
-        'eviction_scale' being the mean time between evictions (scale
-        of an exponential distribution; note scale = 1/lambda).  The
+        'mtbe' being the mean time between evictions (scale
+        of an exponential distribution; where scale = 1/lambda).  The
         restart_delay is the time before a Host comes 'up' after going
         'down'.
         """
@@ -496,48 +541,84 @@ class Host(Actor):
         # be bound to a Simulation.  To initialize with a starting
         # simulation time, for example, we need to override bind_to().
         super(Host, self).__init__()
-        self.up = True
+        self.up = False  # start() will go_up()
         self.host_id = host_id
         self.runtime_model = runtime_model
-        self.eviction_rate = eviction_rate
+        self.mtbe = mtbe
         self.restart_delay = restart_delay
         self._tasks = []
         self._callback = {}
+        self._announce_list = []
+
         if num_slots < 0:
             raise ValueError("Number of Task slots on a Host cannot be negative")
         self.capacity = num_slots
+        self._available = num_slots  # number allocated to this Host
+        self._running = 0            # number currently running
+
         if restart_delay < 0:
             raise ValueError("Restart delay cannot be negative")
         self.restart_delay = restart_delay
 
-    def bind_to(self, simulation):
+    def start(self):
+        super(Host, self).start()
+        self.go_up()
+
+    # def bind_to(self, simulation):
+    #     """
+    #     Overrides Actor.bind_to() to initialize with the initial
+    #     simulation time.
+    #     """
+    #     super(Host, self).bind_to(simulation)
+    #     self.last_eviction = simulation.now
+
+    def assign(self, task, callback):
         """
-        Overrides Actor.bind_to() to initialize with the initial
-        simulation time.
+        Assigns a task to this Host.  This schedules Events to run() and
+        complete() the Task.  This allocates a slot for the given
+        task, but it is not counted as running until the run() event
+        is processed.
         """
-        super(Host, self).__init__()
-        self.last_eviction = simulation.now # (last one *scheduled*)
+        if self._available <= 0:
+            raise SimulationError(self.now, "Host {} cannot be assigned any more tasks".format(repr(self.host_id)))
+        self._available -= 1
+
+        start_time = self.now
+        finish_time = start_time + self.runtime_model.runtime_of(task)
+
+        self.schedule_event(start_time, lambda: self.run(task, callback))
+        self.schedule_event(finish_time, lambda: self.complete(task))
 
     def run(self, task, callback):
         """
         Runs a task on this Host.  When the Task is no longer running on
         this Host (for whatever reason), the callback is called.
         """
-        if not self.available():
-            raise SimulationError(self.now, "Host is full; cannot run Task: {}".format(task))
+        self.sim.log("Running Task {} on Host {}".format(task.task_id, self.host_id))
+        if not self.up:
+            raise SimulationError(self.now, "Host {} is DOWN, cannot run Task: {}".format(repr(self.host_id), task))
+        if self._running >= self.capacity:
+            raise SimulationError(self.now, "Host {} is at capacity; cannot run Task: {}".format(repr(self.host_id), task))
         self._tasks.append(task)
         self._callback[task] = callback
+        task.run(self.now, self)
+        self._running += 1
 
     def complete(self, task):
-        """Complete a Task"""
+        """Completes a Task"""
         task.complete(self.now)
         self.return_task(task)
+        self._running -= 1
+        self._available += 1
+        self.sim.log("Task {} completed on Host {}".format(task.task_id, self.host_id))
 
     def evict_all(self):
         """Evicts all Tasks currently running on this Host"""
-        for task in self._tasks:
+        for task in self._tasks[:]:
             task.evict(self.now)
             self.return_task(task)
+        self._running = 0
+        self._available = self.capacity
 
     def return_task(self, task):
         """
@@ -552,45 +633,74 @@ class Host(Actor):
     def available(self):
         """Returns the number of available slots on this Host"""
         if self.up:
-            return self.capacity - len(self._tasks)
+            return self._available
+            #return self.capacity - len(self._tasks)
         else:
             return 0
 
-    def go_up(self, time=None):
-        """Bring this Host 'up', allowing it to process Tasks"""
-        self.sim.log("Bringing {} UP".format(self))
-        if self.up:
-            raise SimulationError(time, "{} is already up.".format(self))
-        self.up = True
+    def running(self):
+        """Returns the number of tasks running on this Host"""
+        return self._running
 
-    def go_down(self, time=None):
+    def register_announcement(self, master):
+        """
+        This function is called when a Master requests this Host to
+        announce itself whenever it becomes available again
+        (i.e. going 'up' after being 'down').
+        """
+        self._announce_list.append(master)
+
+    def go_up(self):
+        """Bring this Host 'up', allowing it to process Tasks"""
+        self.sim.log("Bringing {} UP".format(repr(self.host_id)))
+        if self.up:
+            raise SimulationError(self.now, "{} is already up.".format(self))
+
+        self.up = True
+        self.up_since = self.now
+        self._available = self.capacity
+        self._running = 0
+        self.last_eviction = self.now
+        for master in self._announce_list:
+            master.announce(self)
+
+    def go_down(self):
         """
         Bring this Host 'down', evicting all current Tasks, preventing it
         from accepting new ones, and schedule an event to bring the
         Host back up.
         """
-        self.sim.log("Bringing {} DOWN".format(self))
+        self.sim.log("Bringing {} DOWN".format(repr(self.host_id)))
         if not self.up:
-            raise SimulationError(time, "{} is already down: {}".format(self.__class__.__name__, self))
+            raise SimulationError(self.now, "{} is already down: {}".format(self.__class__.__name__, self))
+
+        # Change state
         self.up = False
         self.evict_all()
+        self._available = 0
+        self._running = 0
+        
+        # Cancel all events and schedule restart
+        self.sim.cancel_all_from(self)
         self.schedule_event(self.now + self.restart_delay, self.go_up)
 
     def commit_to(self, future_time):
         """Time progression negotiation."""
-        if future_time < self.last_eviction or self.eviction_scale == 0:
-            return future_time
+        if not self.up or future_time < self.last_eviction or self.mtbe is None:
+            return future_time, False
 
-        # Randomly insert the next eviction event
-        next_eviction = self.last_eviction + int(expon.rvs(scale=self.eviction_scale))
+        # Randomly insert another eviction event
+        next_eviction = self.last_eviction + int(expon.rvs(scale=self.mtbe))
+        if next_eviction < self.now:
+            import pdb; pdb.set_trace()
         self.schedule_event(next_eviction, self.go_down)
         self.last_eviction = next_eviction
 
         # Only commit as much as necessary
-        return min(future_time, next_eviction)
+        return min(future_time, next_eviction), True
 
     def __repr__(self):
-        return "{}(host_id={}, capacity={}, tasks={})".format(self.__class__.__name__, self.host_id, self.capacity, self._tasks)
+        return "{}(host_id={}, capacity={}, tasks={})".format(self.__class__.__name__, self.host_id, self.capacity, [task.task_id for task in self._tasks])
 
 class Master(Actor):
     """
@@ -601,15 +711,27 @@ class Master(Actor):
     """
     def __init__(self, initial_units, hosts):
         super(Master, self).__init__()
-        self._remaining_units = initial_units[:]
-        self._processed_units = []
-        if len(hosts) == 0:
-            raise ValueError("No hosts given")
-        self._hosts = hosts[:]
+        self.remaining_units = initial_units[:]
+        self.processed_units = []
+        self.num_units = len(initial_units)
+        self.queue = deque()
         self._num_tasks_created = 0
         self._graveyard = []
         self.max_retries = 10
+
+        # Connect to hosts
+        if len(hosts) == 0:
+            raise ValueError('No hosts given')
+        self.hosts = hosts[:]
+        for host in hosts:
+            host.register_announcement(self)
+
+        # Default host selection technique
         self.select_host = self.select_first_host
+
+    def start(self):
+        super(Master, self).start()
+        self.sim.log("{} starting with {} units and {} hosts".format(self.__class__.__name__, self.num_units, len(self.hosts)))
 
     @property
     def max_retries(self):
@@ -628,6 +750,7 @@ class Master(Actor):
     def create_task(self, units):
         """Creates a new Task with a collection of WorkUnits"""
         self._num_tasks_created += 1
+        self.sim.log('Making Task {} with {} units'.format(self._num_tasks_created, len(units)))
         return Task(self._num_tasks_created, units)
 
     def destroy_task(self, task):
@@ -637,27 +760,80 @@ class Master(Actor):
         """
         for unit in task.units:
             if unit.processed:
-                self._processed_units.append(unit)
+                self.processed_units.append(unit)
             else:
-                self._remaining_units.append(unit)
+                self.remaining_units.append(unit)
         self._graveyard.append(task)
 
-    def submit_task(self, task):
-        """Selects a Host, and submits the given Task to it."""
+        # Check for end of job
+        num_left = self.units_remaining()
+        self.sim.log("{} units remaining".format(num_left))
+        if num_left == 0:
+            self.sim.stop("All units processed")
+
+    def announce(self, host):
+        """
+        A host announces to this Master that it is now up and available to
+        receive tasks.
+        """
+        self.assign_available()
+
+    def assign_task(self, task):
+        """Selects a Host and assigns it the given Task."""
         host = self.select_host(task)
         if host is None:
             raise SimulationError(self.now, "No Host for Task")
-        host.run(task, self.receive_task)
+        host.assign(task, self.receive_task)
+
+    def assign_available(self):
+        """Assign as many tasks to Hosts as possible"""
+        if len(self.queue) == 0:
+            if self.remaining_units > 0:
+                self.make_tasks()
+
+        if len(self.queue) == 0:
+            for host in self.hosts:
+                if host.running():
+                    return
+            # Nothing in queue, nothing assigned, no remaining_units, so nothing left to do
+            self.sim.stop("Nothing queued, nothing to assign")
+            return
+
+        # Remove from queue and assign to hosts
+        num_available = sum((host.available() for host in self.hosts))
+        while num_available > 0 and len(self.queue) > 0:
+            self.assign_task(self.queue.pop())
+            num_available -= 1
+
+    def make_tasks(self):
+        """Populate the queue with tasks"""
+        bitesize = getattr(self, 'bitesize', 1)
+        num_made = 0
+        while len(self.remaining_units) > 0:
+            bite = self.remaining_units[0:bitesize]
+            self.remaining_units = self.remaining_units[bitesize:]
+            self.submit_task(self.create_task(bite))
+        #self.sim.log('Queue has {} tasks'.format(len(self.queue)))
+        return num_made
+
+    def submit_task(self, task):
+        """Submits a task to the queue"""
+        self.queue.appendleft(task)
 
     def receive_task(self, task):
         """
         Receives a Task returned from a Host, and resubmits or destroys
         it.  (This is the default callback when submitting to Hosts.)
         """
-        if len(task.history) < self.max_retries:
+        if not task.is_done and len(task.history) < self.max_retries:
             self.submit_task(task)
         else:
             self.destroy_task(task)
+        self.assign_available()
+
+    def units_remaining(self):
+        """Returns the number of work units remaining"""
+        return self.num_units - len(self.processed_units)
 
     # How to select a Host for a given Task is an important strategy,
     # so multiple implementations are given.  Whatever select_host
@@ -666,24 +842,24 @@ class Master(Actor):
     def select_random(self, task):
         """Select an available host at random."""
         try:
-            return random.choice([host for host in self._hosts if host.available()])
+            return random.choice([host for host in self.hosts if host.available()])
         except IndexError:
             return None
 
     def select_first_host(self, task):
         """Selects the first Host that can run the given Task."""
-        for host in self._hosts:
+        for host in self.hosts:
             if host.available():
                 return host
         return None
 
     def select_round_robin(self, task):
         """Selects the next available Host in a round-robin fashion"""
-        num_hosts = len(self._hosts)
+        num_hosts = len(self.hosts)
         last_index = getattr(self, '_last_round_robin', num_hosts - 1)
         for h in xrange(1, num_hosts + 1):
             index = (last_index + h) % num_hosts
-            host = self._hosts[index]
+            host = self.hosts[index]
             if host.available():
                 self._last_round_robin = index
                 return host
@@ -700,7 +876,7 @@ class Master(Actor):
     def select_by_busyness(self, task, order):
         """Selects an available Host based on the number of free slots."""
         try:
-            return sorted([(host, host.available()) for host in self._hosts if host.available()], \
+            return sorted([(host, host.available()) for host in self.hosts if host.available()], \
                           key=lambda p: p[1], reverse=order)[0]
         except IndexError:
             return None
