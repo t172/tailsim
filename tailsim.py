@@ -1,6 +1,7 @@
 #!/bin/python
 
 from __future__ import print_function
+
 import sys
 import random
 from collections import deque
@@ -14,6 +15,19 @@ class Time:
     millisecond = 1e3
     second = 1e6
     hour = 3.6e9
+
+    @classmethod
+    def to_hour(cls, value):
+        return value/float(Time.hour)
+    @classmethod
+    def to_second(cls, value):
+        return value/float(Time.second)
+    @classmethod
+    def to_millisecond(cls, value):
+        return value/float(Time.millisecond)
+    @classmethod
+    def to_microsecond(cls, value):
+        return value/float(Time.microsecond)
 
 class SimulationError(Exception):
     """A logical error in the simulation."""
@@ -138,13 +152,14 @@ class Simulation(object):
     Actors that submit Events, and applies the Events submitted at the
     appropriate simulation time.
     """
-    def __init__(self):
+    def __init__(self, logfile=sys.stderr):
         self.now = 0
         self.actors = []
         self._schedule = deque()
         #self._canceled_events = []
         #self._past_events = []
         self._commit_time = self.now  # latest unanimous commitment
+        self.logfile = logfile
 
     def add_actor(self, actor):
         """Adds an actor to this Simulation"""
@@ -165,8 +180,6 @@ class Simulation(object):
         if event.time < event.actor.commitment:
             raise SimulationError(self.now, "{} violates {}'s commitment of time {}".format(event, event.actor, event.actor.commitment))
 
-        #print('Adding', event, 'to', self._schedule)
-
         # Insert new event in order
         if len(self._schedule) == 0:
             self._schedule.appendleft(event)
@@ -177,8 +190,6 @@ class Simulation(object):
             self._schedule.rotate(-rotation)
             self._schedule.appendleft(event)
             self._schedule.rotate(rotation)
-
-        #print('Schedule is', self._schedule)
 
         # Here, we simply return the event itself, but this should be
         # considered an implementation detail.  What the return value
@@ -220,7 +231,8 @@ class Simulation(object):
 
     def log(self, msg):
         """Logs the given message"""
-        print(self.now, msg, file=sys.stderr)
+        if self.logfile is not None:
+            print(self.now, msg, file=self.logfile)
 
     def take_next(self):
         """
@@ -252,6 +264,7 @@ class Simulation(object):
                 for actor in self.actors:
                     commitment, dirty = actor.commit_to(self._schedule[-1].time)
                     if dirty:
+                        #print(actor, 'added an event', file=sys.stderr)
                         break
                     commitments.append(commitment)
             self._commit_time = min(commitments)
@@ -290,7 +303,6 @@ class Simulation(object):
             if event.time < self.now:
                 raise SimulationError(self.now, "Event is stale: {}".format(event))
             self.now = event.time
-            #self.log('Doing {}'.format(event))
             event()
         self.log("Done")
 
@@ -549,6 +561,7 @@ class Host(Actor):
         self._tasks = []
         self._callback = {}
         self._announce_list = []
+        self.evicted_tasks = 0       # kill counter
 
         if num_slots < 0:
             raise ValueError("Number of Task slots on a Host cannot be negative")
@@ -607,15 +620,16 @@ class Host(Actor):
     def complete(self, task):
         """Completes a Task"""
         task.complete(self.now)
+        self.sim.log("Task {} completed on Host {}".format(task.task_id, self.host_id))
         self.return_task(task)
         self._running -= 1
         self._available += 1
-        self.sim.log("Task {} completed on Host {}".format(task.task_id, self.host_id))
 
     def evict_all(self):
         """Evicts all Tasks currently running on this Host"""
         for task in self._tasks[:]:
             task.evict(self.now)
+            self.evicted_tasks += 1
             self.return_task(task)
         self._running = 0
         self._available = self.capacity
@@ -641,6 +655,14 @@ class Host(Actor):
     def running(self):
         """Returns the number of tasks running on this Host"""
         return self._running
+
+    def assigned(self):
+        """
+        Returns the number of tasks assigned on this Host.  Note that this
+        may be different from the number running, if the assigned
+        tasks have yet to start running.
+        """
+        return self.capacity - self._available
 
     def register_announcement(self, master):
         """
@@ -793,7 +815,7 @@ class Master(Actor):
 
         if len(self.queue) == 0:
             for host in self.hosts:
-                if host.running():
+                if host.assigned():
                     return
             # Nothing in queue, nothing assigned, no remaining_units, so nothing left to do
             self.sim.stop("Nothing queued, nothing to assign")
@@ -813,7 +835,6 @@ class Master(Actor):
             bite = self.remaining_units[0:bitesize]
             self.remaining_units = self.remaining_units[bitesize:]
             self.submit_task(self.create_task(bite))
-        #self.sim.log('Queue has {} tasks'.format(len(self.queue)))
         return num_made
 
     def submit_task(self, task):

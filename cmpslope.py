@@ -117,7 +117,10 @@ def main():
 
     legend_handles = [mpatches.Patch(color=colors[i]) for i in reversed(range(len(labels)))]
     legend_labels = [lbl for lbl in reversed(labels)]
-    plt.figlegend(legend_handles, legend_labels, loc='lower center', ncol=len(labels))
+    if num_files > 1:
+        plt.figlegend(legend_handles, legend_labels, loc='lower center', ncol=len(labels))
+    else:
+        plt.figlegend(legend_handles, legend_labels, loc='lower center', ncol=len(labels))
 
     if cmdline.outfile is not None:
         plt.savefig(cmdline.outfile)
