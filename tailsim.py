@@ -14,6 +14,7 @@ class Time:
     microsecond = 1.0
     millisecond = 1e3
     second = 1e6
+    minute = 6e7
     hour = 3.6e9
 
     @classmethod
@@ -244,10 +245,10 @@ class Simulation(object):
                 self.log("Stopping")
                 return
 
-            for i in xrange(len(self._schedule)-1):
-                if self._schedule[i].time < self._schedule[i+1].time:
-                    print('Schedule is out of order, pos', i)
-                    import pdb; pdb.set_trace()
+            # for i in xrange(len(self._schedule)-1):
+            #     if self._schedule[i].time < self._schedule[i+1].time:
+            #         print('Schedule is out of order, pos', i)
+            #         import pdb; pdb.set_trace()
 
             # First event may be within commitment
             try:
@@ -307,7 +308,7 @@ class Simulation(object):
         self.log("Done")
 
     def stop(self, reason=None):
-        """Request the Simulation to stop."""
+        """Requests the Simulation to stop."""
         if reason:
             self.log('Stop requested: ' + str(reason))
         self.stop_requested = True
@@ -575,7 +576,14 @@ class Host(Actor):
 
     def start(self):
         super(Host, self).start()
-        self.go_up()
+
+        # Go up, but do not announce.  This is to try to model the
+        # hosts having started sometime in the past.  This is to allow
+        # for the master to wait to assign its initial tasks.  Hosts
+        # can randomly go up and down before the master begins.
+        # Otherwise, there is a brief period at the beginning when
+        # evictions on all hosts are improbable
+        self.go_up(announce=False)
 
     # def bind_to(self, simulation):
     #     """
@@ -672,7 +680,7 @@ class Host(Actor):
         """
         self._announce_list.append(master)
 
-    def go_up(self):
+    def go_up(self, announce=True):
         """Bring this Host 'up', allowing it to process Tasks"""
         self.sim.log("Bringing {} UP".format(repr(self.host_id)))
         if self.up:
@@ -683,8 +691,9 @@ class Host(Actor):
         self._available = self.capacity
         self._running = 0
         self.last_eviction = self.now
-        for master in self._announce_list:
-            master.announce(self)
+        if announce:
+            for master in self._announce_list:
+                master.announce(self)
 
     def go_down(self):
         """
@@ -713,8 +722,8 @@ class Host(Actor):
 
         # Randomly insert another eviction event
         next_eviction = self.last_eviction + int(expon.rvs(scale=self.mtbe))
-        if next_eviction < self.now:
-            import pdb; pdb.set_trace()
+        # if next_eviction < self.now:
+        #     import pdb; pdb.set_trace()
         self.schedule_event(next_eviction, self.go_down)
         self.last_eviction = next_eviction
 
@@ -888,19 +897,25 @@ class Master(Actor):
 
     def select_least_busy(self, task):
         """Selects the Host with the lowest number of Tasks"""
-        self.select_by_busyness(task, True)
+        return self.select_by_busyness(task, True)
 
     def select_most_busy(self, task):
         """Selects the Host with the highest number Tasks"""
-        self.select_by_busyness(task, False)
+        return self.select_by_busyness(task, False)
 
     def select_by_busyness(self, task, order):
         """Selects an available Host based on the number of free slots."""
         try:
-            return sorted([(host, host.available()) for host in self.hosts if host.available()], \
-                          key=lambda p: p[1], reverse=order)[0]
+            return sorted([(host.available(), host) for host in self.hosts if host.available()], reverse=order)[0][1]
         except IndexError:
             return None
+
+    def select_by_mtbe(self, tail):
+        """
+        Selects the available Host with the lowest mean time between
+        evictions.
+        """
+        pass
 
 def main():
     pass
