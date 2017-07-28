@@ -80,8 +80,6 @@ class Actor(object):
     @property
     def sim(self):
         """The Simulation this Actor is bound to"""
-        # if self._simulation is None:
-        #     raise SimulationError(None, "{} is not registered with any Simulation: {}".format(self.__class__.__name__, self))
         return self._simulation
 
     @property
@@ -157,8 +155,6 @@ class Simulation(object):
         self.now = 0
         self.actors = []
         self._schedule = deque()
-        #self._canceled_events = []
-        #self._past_events = []
         self._commit_time = self.now  # latest unanimous commitment
         self.logfile = logfile
 
@@ -206,8 +202,6 @@ class Simulation(object):
             self._schedule.remove(handle)
         except ValueError:
             raise SimulationError(self.now, "Cannot cancel event {}".format(handle))
-        #self._canceled_events.append(handle)
-        #self.log("Canceled {}".format(handle))
 
     def cancel_all_from(self, actor):
         """
@@ -227,7 +221,6 @@ class Simulation(object):
             else:
                 new_schedule.appendleft(event)
         self._schedule = new_schedule
-        #self.log('Canceled {} events'.format(num_canceled))
         return num_canceled
 
     def log(self, msg):
@@ -245,11 +238,6 @@ class Simulation(object):
                 self.log("Stopping")
                 return
 
-            # for i in xrange(len(self._schedule)-1):
-            #     if self._schedule[i].time < self._schedule[i+1].time:
-            #         print('Schedule is out of order, pos', i)
-            #         import pdb; pdb.set_trace()
-
             # First event may be within commitment
             try:
                 if self._commit_time >= self._schedule[-1].time:
@@ -265,7 +253,6 @@ class Simulation(object):
                 for actor in self.actors:
                     commitment, dirty = actor.commit_to(self._schedule[-1].time)
                     if dirty:
-                        #print(actor, 'added an event', file=sys.stderr)
                         break
                     commitments.append(commitment)
             self._commit_time = min(commitments)
@@ -909,13 +896,6 @@ class Master(Actor):
             return sorted([(host.available(), host) for host in self.hosts if host.available()], reverse=order)[0][1]
         except IndexError:
             return None
-
-    def select_by_mtbe(self, tail):
-        """
-        Selects the available Host with the lowest mean time between
-        evictions.
-        """
-        pass
 
 def main():
     pass
